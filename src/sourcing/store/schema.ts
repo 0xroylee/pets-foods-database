@@ -55,4 +55,29 @@ export const MIGRATIONS: readonly string[] = [
   CREATE TRIGGER raw_payload_no_delete BEFORE DELETE ON raw_payload
   BEGIN SELECT RAISE(ABORT, 'raw payloads are immutable'); END;
   `,
+  `
+  -- A raw recall group: one upstream event at one firm. It correlates source documents and is
+  -- not a core Incident; each member keeps its own identity and history.
+  CREATE TABLE raw_recall_event (
+    raw_recall_event_id INTEGER PRIMARY KEY,
+    publisher_key TEXT NOT NULL,
+    upstream_event_id TEXT NOT NULL,
+    fei_number TEXT NOT NULL,
+    UNIQUE (publisher_key, upstream_event_id, fei_number)
+  );
+
+  CREATE TABLE raw_recall_membership (
+    raw_recall_event_id INTEGER NOT NULL REFERENCES raw_recall_event (raw_recall_event_id),
+    document_id INTEGER NOT NULL REFERENCES raw_document (document_id),
+    supporting_revision_id INTEGER NOT NULL REFERENCES raw_revision (revision_id),
+    basis TEXT NOT NULL CHECK (basis IN ('explicit_identifiers', 'source_cross_reference')),
+    linked_at TEXT NOT NULL,
+    UNIQUE (raw_recall_event_id, document_id, supporting_revision_id)
+  );
+
+  CREATE TRIGGER raw_document_no_delete BEFORE DELETE ON raw_document
+  BEGIN SELECT RAISE(ABORT, 'raw documents are never deleted'); END;
+  CREATE TRIGGER raw_recall_membership_no_delete BEFORE DELETE ON raw_recall_membership
+  BEGIN SELECT RAISE(ABORT, 'recall memberships are never deleted'); END;
+  `,
 ];

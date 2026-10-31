@@ -45,8 +45,36 @@ export interface RevisionEntry {
   record: CollectorRecordV1;
 }
 
+/** A verified statement that a stored document belongs to one upstream recall event. */
+export interface RecallAssociation {
+  publisherKey: string;
+  eventId: string;
+  feiNumber: string;
+  identity: DocumentIdentity;
+  /** Either the document's own identifiers, or an authoritative record that cites it. */
+  basis: "explicit_identifiers" | "source_cross_reference";
+}
+
+export interface LinkResult {
+  recallEventId: number;
+  documentId: number;
+  membership: "added" | "existing";
+}
+
+export interface RecallGroup {
+  eventId: string;
+  feiNumber: string;
+}
+
+export interface RecallGroupMember {
+  identity: DocumentIdentity;
+  documentType: string;
+  basis: RecallAssociation["basis"];
+}
+
 export interface RawTransaction {
   putRecord(input: PutRecordInput): StoreOutcome;
+  linkRecallEvent(association: RecallAssociation): LinkResult;
 }
 
 /**
@@ -84,8 +112,97 @@ export class RawStore {
 
   /** Runs fn in one immediate transaction; everything it writes commits together or not at all. */
   transaction<T>(fn: (tx: RawTransaction) => T): T {
-    const tx: RawTransaction = { putRecord: (input) => this.#put(input) };
+    const tx: RawTransaction = {
+      putRecord: (input) => this.#put(input),
+      linkRecallEvent: (association) => this.#link(association),
+    };
     return this.#db.transaction(() => fn(tx)).immediate();
+  }
+
+  /** The recall groups a document belongs to. */
+  recallGroupsFor(publisherKey: string, identity: DocumentIdentity): RecallGroup[] {
+    return this.#db
+      .query<{ upstream_event_id: string; fei_number: string }, [string, string, string]>(
+        `SELECT DISTINCT e.upstream_event_id, e.fei_number
+           FROM raw_recall_event e
+           JOIN raw_recall_membership m ON m.raw_recall_event_id = e.raw_recall_event_id
+           JOIN raw_document d ON d.document_id = m.document_id
+          WHERE d.publisher_key = ? AND d.identity_namespace = ? AND d.source_document_key = ?
+          ORDER BY e.upstream_event_id, e.fei_number`,
+      )
+      .all(publisherKey, identity.namespace, identity.key)
+      .map((row) => ({ eventId: row.upstream_event_id, feiNumber: row.fei_number }));
+  }
+
+  /** The documents in one recall group, each listed once. */
+  recallGroupMembers(publisherKey: string, group: RecallGroup): RecallGroupMember[] {
+    return this.#db
+      .query<
+        {
+          identity_namespace: string;
+          source_document_key: string;
+          document_type: string;
+          basis: string;
+        },
+        [string, string, string]
+      >(
+        `SELECT d.identity_namespace, d.source_document_key, d.document_type, min(m.basis) AS basis
+           FROM raw_recall_membership m
+           JOIN raw_recall_event e ON e.raw_recall_event_id = m.raw_recall_event_id
+           JOIN raw_document d ON d.document_id = m.document_id
+          WHERE e.publisher_key = ? AND e.upstream_event_id = ? AND e.fei_number = ?
+          GROUP BY d.document_id
+          ORDER BY d.document_id`,
+      )
+      .all(publisherKey, group.eventId, group.feiNumber)
+      .map((row) => ({
+        identity: { namespace: row.identity_namespace, key: row.source_document_key },
+        documentType: row.document_type,
+        basis: row.basis as RecallAssociation["basis"],
+      }));
+  }
+
+  #link(association: RecallAssociation): LinkResult {
+    const db = this.#db;
+    const document = db
+      .query<{ document_id: number; current_revision_id: number | null }, [string, string, string]>(
+        `SELECT document_id, current_revision_id FROM raw_document
+          WHERE publisher_key = ? AND identity_namespace = ? AND source_document_key = ?`,
+      )
+      .get(association.publisherKey, association.identity.namespace, association.identity.key);
+    if (!document || document.current_revision_id === null) {
+      throw new Error("a recall association needs a stored document");
+    }
+    db.query<never, [string, string, string]>(
+      `INSERT OR IGNORE INTO raw_recall_event (publisher_key, upstream_event_id, fei_number)
+       VALUES (?, ?, ?)`,
+    ).run(association.publisherKey, association.eventId, association.feiNumber);
+    const event = db
+      .query<{ raw_recall_event_id: number }, [string, string, string]>(
+        `SELECT raw_recall_event_id FROM raw_recall_event
+          WHERE publisher_key = ? AND upstream_event_id = ? AND fei_number = ?`,
+      )
+      .get(association.publisherKey, association.eventId, association.feiNumber) as {
+      raw_recall_event_id: number;
+    };
+    const inserted = db
+      .query<never, [number, number, number, string, string]>(
+        `INSERT OR IGNORE INTO raw_recall_membership
+           (raw_recall_event_id, document_id, supporting_revision_id, basis, linked_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        event.raw_recall_event_id,
+        document.document_id,
+        document.current_revision_id,
+        association.basis,
+        new Date().toISOString(),
+      );
+    return {
+      recallEventId: event.raw_recall_event_id,
+      documentId: document.document_id,
+      membership: inserted.changes > 0 ? "added" : "existing",
+    };
   }
 
   putRecord(input: PutRecordInput): StoreOutcome {
