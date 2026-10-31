@@ -1,0 +1,4 @@
+# unshit run artifacts: third-party source snapshots and evidence. Plans are copied to docs/plans.
+.unshit/
+.DS_Store
+node_modules/
