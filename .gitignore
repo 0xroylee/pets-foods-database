@@ -2,3 +2,5 @@
 .unshit/
 .DS_Store
 node_modules/
+# Local raw store and other private data
+data/

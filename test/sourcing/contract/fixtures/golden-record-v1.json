@@ -1,0 +1,59 @@
+{
+  "schema": "pfdb.collector-record.v1",
+  "source": {
+    "key": "us-fda",
+    "name": "U.S. Food and Drug Administration"
+  },
+  "source_ids": {
+    "recall_event_id": "90001",
+    "recall_number": "V-0123-2026",
+    "fei_number": "3001234567"
+  },
+  "document_type": "enforcement_report_recall",
+  "original_url": "https://www.accessdata.fda.gov/scripts/ires/index.cfm?Event=90001",
+  "retrieved_at": "2026-10-31T08:00:00Z",
+  "payload": {
+    "media_type": "application/json",
+    "encoding": "utf8",
+    "body": "{\"recalleventid\":\"90001\",\"recallnum\":\"V-0123-2026\",\"producttypeshort\":\"Veterinary\",\"productdescriptiontxt\":\"Example Brand Chicken Recipe Dry Dog Food, 30 lb bag, UPC 0 76847 61701 5\",\"firmfeinum\":\"3001234567\"}"
+  },
+  "content_hash": "sha256:3bb6be337f7adbf4fc86b7909b07a8931f99140eea17d095cb0223da21c1e945",
+  "origin": {
+    "collector": "fda-ires",
+    "collector_version": "0.1.0",
+    "acquisition": "api",
+    "fixture": true,
+    "referenced_urls": []
+  },
+  "extracted": {
+    "product_description": "Example Brand Chicken Recipe Dry Dog Food, 30 lb bag, UPC 0 76847 61701 5",
+    "firm": "Example Pet Foods LLC",
+    "fei_number": "3001234567",
+    "recall_number": "V-0123-2026",
+    "recall_event_id": "90001",
+    "classification": "Class II",
+    "status": "Ongoing",
+    "dates": {
+      "recall_initiation_date": "2026-09-15",
+      "report_date": "2026-10-01"
+    },
+    "distribution": "Nationwide in the USA and Taiwan",
+    "markets": ["US", "TW"],
+    "lot_codes": ["L2615A"],
+    "best_by_dates": ["2027-09-15"],
+    "barcodes": [
+      {
+        "value": "032251004292",
+        "format": "upc_a",
+        "origin": "declared",
+        "valid": true
+      },
+      {
+        "value": "076847617015",
+        "format": "upc_a",
+        "origin": "text",
+        "valid": true
+      }
+    ]
+  }
+}
