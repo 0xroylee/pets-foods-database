@@ -30,8 +30,17 @@ export interface FetchResult {
   provenance?: FixtureProvenance;
 }
 
+/** How the runner follows one request: it aborts through signal and watches progress. */
+export interface TransportContext {
+  signal?: AbortSignal;
+  /** Called once the status line and headers have arrived. */
+  onHeaders?: (status: number) => void;
+  /** Called for every body chunk as it arrives. */
+  onChunk?: (chunk: Uint8Array) => void;
+}
+
 export interface HttpTransport {
-  sendAndRead(request: PublicRequestDescription): Promise<FetchResult>;
+  sendAndRead(request: PublicRequestDescription, context?: TransportContext): Promise<FetchResult>;
 }
 
 export interface RecordedFixture {
@@ -64,19 +73,25 @@ export class FixtureTransport implements HttpTransport {
     );
   }
 
-  async sendAndRead(request: PublicRequestDescription): Promise<FetchResult> {
+  async sendAndRead(
+    request: PublicRequestDescription,
+    context: TransportContext = {},
+  ): Promise<FetchResult> {
     const fixture = this.#fixtures.get(fixtureKey(request));
     if (!fixture) {
       throw new FixtureMissingError(`no recorded response for ${request.method} ${request.url}`);
     }
     const { response } = fixture;
+    const body =
+      response.encoding === "base64"
+        ? new Uint8Array(Buffer.from(response.body, "base64"))
+        : new TextEncoder().encode(response.body);
+    context.onHeaders?.(response.status);
+    context.onChunk?.(body);
     return {
       status: response.status,
       headers: response.headers,
-      body:
-        response.encoding === "base64"
-          ? new Uint8Array(Buffer.from(response.body, "base64"))
-          : new TextEncoder().encode(response.body),
+      body,
       url: request.url,
       transport: "fixture",
       provenance: fixture.provenance,
@@ -99,7 +114,10 @@ export class LiveTransport implements HttpTransport {
     this.#options = options;
   }
 
-  async sendAndRead(request: PublicRequestDescription): Promise<FetchResult> {
+  async sendAndRead(
+    request: PublicRequestDescription,
+    context: TransportContext = {},
+  ): Promise<FetchResult> {
     const { fetch: send, credentials, credentialOrigins } = this.#options;
     const headers = new Headers(request.headers);
     if (credentials && credentialOrigins.includes(new URL(request.url).origin)) {
@@ -111,11 +129,13 @@ export class LiveTransport implements HttpTransport {
         headers,
         body: request.body,
         redirect: "manual",
+        signal: context.signal,
       });
+      context.onHeaders?.(response.status);
       return {
         status: response.status,
         headers: Object.fromEntries(response.headers),
-        body: new Uint8Array(await response.arrayBuffer()),
+        body: await readBody(response, context),
         url: request.url,
         transport: "live",
       };
@@ -124,6 +144,26 @@ export class LiveTransport implements HttpTransport {
       throw Object.assign(new Error(safe.message), { name: safe.name });
     }
   }
+}
+
+// Reads the body chunk by chunk so an abort cancels the reader instead of leaving it running.
+async function readBody(response: Response, context: TransportContext): Promise<Uint8Array> {
+  if (!response.body) return new Uint8Array();
+  const reader = response.body.getReader();
+  const cancel = () => void reader.cancel().catch(() => {});
+  context.signal?.addEventListener("abort", cancel, { once: true });
+  const chunks: Uint8Array[] = [];
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      context.onChunk?.(value);
+    }
+  } finally {
+    context.signal?.removeEventListener("abort", cancel);
+  }
+  return Buffer.concat(chunks);
 }
 
 function fixtureKey(request: { method: string; url: string; body?: string }): string {

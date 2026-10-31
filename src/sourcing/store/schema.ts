@@ -80,4 +80,52 @@ export const MIGRATIONS: readonly string[] = [
   CREATE TRIGGER raw_recall_membership_no_delete BEFORE DELETE ON raw_recall_membership
   BEGIN SELECT RAISE(ABORT, 'recall memberships are never deleted'); END;
   `,
+  `
+  -- Collection work. Times are epoch milliseconds.
+  CREATE TABLE work_item (
+    work_id INTEGER PRIMARY KEY,
+    adapter_key TEXT NOT NULL,
+    work_key TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'completed', 'refused', 'failed')),
+    eligible_at INTEGER NOT NULL,
+    -- Transient failures in the run named by run_failures_run_id; a new run starts again at 0.
+    run_failures INTEGER NOT NULL DEFAULT 0,
+    run_failures_run_id TEXT,
+    created_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    UNIQUE (adapter_key, work_key)
+  );
+  CREATE INDEX work_item_by_state ON work_item (state, eligible_at);
+
+  -- One row per request, written before the request is sent and finished afterwards.
+  CREATE TABLE fetch_attempt (
+    attempt_id INTEGER PRIMARY KEY,
+    work_id INTEGER NOT NULL REFERENCES work_item (work_id),
+    run_id TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    outcome TEXT CHECK (outcome IN ('success', 'transient_error', 'refused', 'deadline_exceeded',
+                                    'http_error', 'interrupted')),
+    detail TEXT,
+    http_status INTEGER,
+    -- Whatever arrived before a deadline: kept as incomplete evidence, never as a document.
+    partial_body BLOB
+  );
+  CREATE TRIGGER fetch_attempt_no_delete BEFORE DELETE ON fetch_attempt
+  BEGIN SELECT RAISE(ABORT, 'fetch attempts are never deleted'); END;
+
+  -- The earliest time the next request to an origin may be sent; survives restarts.
+  CREATE TABLE origin_pacing (
+    origin TEXT PRIMARY KEY,
+    next_allowed_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE collection_checkpoint (
+    adapter_key TEXT PRIMARY KEY,
+    checkpoint_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  `,
 ];

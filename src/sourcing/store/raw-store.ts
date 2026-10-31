@@ -94,6 +94,14 @@ export class RawStore {
     this.#db = db;
   }
 
+  /**
+   * The connection itself, for collection modules whose writes must share a transaction with
+   * putRecord. Anything run inside transaction() on it commits or rolls back together.
+   */
+  get database(): Database {
+    return this.#db;
+  }
+
   static open(path: string): RawStore {
     const file = resolve(path);
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
