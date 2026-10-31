@@ -11,7 +11,8 @@
     "verify:sourcing:store": "bun test test/sourcing/store",
     "verify:sourcing:recall-identity": "bun test test/sourcing/fda/recall-identity.test.ts",
     "verify:sourcing:credentials": "bun test test/sourcing/credentials",
-    "verify:sourcing:recovery": "bun test test/sourcing/collect"
+    "verify:sourcing:recovery": "bun test test/sourcing/collect",
+    "verify:sourcing:screening": "bun test test/sourcing/screening"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.3",

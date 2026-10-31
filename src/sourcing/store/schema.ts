@@ -128,4 +128,12 @@ export const MIGRATIONS: readonly string[] = [
     updated_at INTEGER NOT NULL
   );
   `,
+  `
+  -- The deterministic Pet Food screening of each retrieval. Every record is kept whatever its
+  -- flag; the core's triage makes the final decision.
+  ALTER TABLE raw_observation ADD COLUMN candidate_flag TEXT
+    CHECK (candidate_flag IN ('likely', 'unlikely', 'unknown'));
+  ALTER TABLE raw_observation ADD COLUMN screening_rule_version TEXT;
+  ALTER TABLE raw_observation ADD COLUMN screening_reasons TEXT;
+  `,
 ];

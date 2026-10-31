@@ -11,6 +11,7 @@ import {
   encodeCollectorRecordV1,
   payloadBytes,
 } from "../contract/collector-record.ts";
+import type { CandidateAssessment } from "../screening.ts";
 import { MIGRATIONS } from "./schema.ts";
 
 /** How a collector identifies one source document, e.g. an iRES product row. */
@@ -34,6 +35,16 @@ export interface PutRecordInput {
   record: CollectorRecordV1;
   /** Unique per retrieval, e.g. a work item and attempt. Replaying it writes nothing. */
   observationKey: string;
+  /** The Pet Food screening of this retrieval, kept with the observation. */
+  screening?: CandidateAssessment;
+}
+
+export interface ObservationEntry {
+  observationKey: string;
+  disposition: Disposition;
+  candidateFlag: CandidateAssessment["flag"] | null;
+  screeningRuleVersion: string | null;
+  screeningReasons: CandidateAssessment["reasons"];
 }
 
 export interface RevisionEntry {
@@ -276,7 +287,37 @@ export class RawStore {
     this.#db.close();
   }
 
-  #put({ identity, record, observationKey }: PutRecordInput): StoreOutcome {
+  /** Every retrieval of one document, oldest first, with its screening. */
+  observations(publisherKey: string, identity: DocumentIdentity): ObservationEntry[] {
+    return this.#db
+      .query<
+        {
+          observation_key: string;
+          disposition: Disposition;
+          candidate_flag: CandidateAssessment["flag"] | null;
+          screening_rule_version: string | null;
+          screening_reasons: string | null;
+        },
+        [string, string, string]
+      >(
+        `SELECT o.observation_key, o.disposition, o.candidate_flag, o.screening_rule_version,
+                o.screening_reasons
+           FROM raw_observation o
+           JOIN raw_document d ON d.document_id = o.document_id
+          WHERE d.publisher_key = ? AND d.identity_namespace = ? AND d.source_document_key = ?
+          ORDER BY o.rowid`,
+      )
+      .all(publisherKey, identity.namespace, identity.key)
+      .map((row) => ({
+        observationKey: row.observation_key,
+        disposition: row.disposition,
+        candidateFlag: row.candidate_flag,
+        screeningRuleVersion: row.screening_rule_version,
+        screeningReasons: row.screening_reasons ? JSON.parse(row.screening_reasons) : [],
+      }));
+  }
+
+  #put({ identity, record, observationKey, screening }: PutRecordInput): StoreOutcome {
     const db = this.#db;
     const replay = db
       .query<ObservationRow, [string]>(
@@ -372,10 +413,14 @@ export class RawStore {
       "UPDATE raw_document SET last_seen_at = max(last_seen_at, ?) WHERE document_id = ?",
     ).run(record.retrieved_at, document.document_id);
 
-    db.query<never, [string, number, number, string, string, string]>(
+    db.query<
+      never,
+      [string, number, number, string, string, string, string | null, string | null, string | null]
+    >(
       `INSERT INTO raw_observation (observation_key, document_id, revision_id, disposition,
-                                    retrieved_at, committed_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+                                    retrieved_at, committed_at, candidate_flag,
+                                    screening_rule_version, screening_reasons)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       observationKey,
       document.document_id,
@@ -383,6 +428,9 @@ export class RawStore {
       disposition,
       record.retrieved_at,
       new Date().toISOString(),
+      screening?.flag ?? null,
+      screening?.ruleVersion ?? null,
+      screening ? JSON.stringify(screening.reasons) : null,
     );
     return {
       disposition,

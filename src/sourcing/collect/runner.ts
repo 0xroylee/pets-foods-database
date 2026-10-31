@@ -5,6 +5,7 @@
 
 import type { CollectorRecordV1 } from "../contract/collector-record.ts";
 import type { FetchResult, HttpTransport } from "../http/transport.ts";
+import { screenRecord } from "../screening.ts";
 import type { DocumentIdentity, RawStore } from "../store/raw-store.ts";
 import { type Clock, systemClock } from "./clock.ts";
 import { type AttemptOutcome, type NewWork, type WorkItem, WorkQueue } from "./work-queue.ts";
@@ -206,11 +207,14 @@ export async function runCollection(options: RunOptions): Promise<RunSummary> {
     try {
       store.transaction((tx) => {
         let index = 0;
+        // Every record is stored with its screening, whatever the flag.
         for (const { identity, record } of effect.records) {
+          const screening = screenRecord(record);
           tx.putRecord({
             identity,
             record,
             observationKey: `${adapter.key}:${work.workKey}#${attemptId}:${index++}`,
+            screening,
           });
         }
         queue.enqueue(adapter.key, effect.successors ?? [], now);
