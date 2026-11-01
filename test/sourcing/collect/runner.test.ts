@@ -116,7 +116,8 @@ describe("pacing and retries (T5-A1)", () => {
     const { transport, dispatchedAt } = scriptedTransport(clock, () => result(401));
     const adapters = [singleItemAdapter("refused", "https://refused.test")];
     const summary = await drive(clock, runCollection({ store, adapters, transport, clock }));
-    expect(summary.status).toBe("completed");
+    // The refused work waits out its cooldown beyond this run.
+    expect(summary.status).toBe("deferred");
     expect(dispatchedAt).toHaveLength(1);
     const queue = new WorkQueue(store.database);
     expect(queue.attempts("refused").map((a) => [a.outcome, a.httpStatus])).toEqual([

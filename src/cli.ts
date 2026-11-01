@@ -1,15 +1,19 @@
 // The back office command line. Manual and scheduled collection run the same command:
 //   bun src/cli.ts collect [--mode auto|fixture|live] [--trigger manual|scheduled]
+//   bun src/cli.ts health [--mode fixture|live]
 //   bun src/cli.ts schedule install [--label L] [--interval SECONDS] [--home DIR]
 //   bun src/cli.ts schedule status [--label L]
 //   bun src/cli.ts schedule remove [--label L]
 // PFDB_HOME moves the private app folder (run lock, raw stores, logs) and
 // PFDB_FDA_CREDENTIALS moves the keys file.
 
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { appHome } from "./sourcing/app-home.ts";
+import { appHome, dataDir } from "./sourcing/app-home.ts";
 import { runCollectCommand } from "./sourcing/collect/command.ts";
+import { collectionHealth } from "./sourcing/collect/health.ts";
+import { rawStorePath } from "./sourcing/collect/mode.ts";
 import {
   buildMacSchedule,
   inspectInstalledSchedule,
@@ -20,9 +24,11 @@ import {
   scheduleConfiguration,
 } from "./sourcing/schedule/launchd.ts";
 import { collectionSources } from "./sourcing/sources.ts";
+import { RawStore } from "./sourcing/store/raw-store.ts";
 
 const USAGE = `usage:
   bun src/cli.ts collect [--mode auto|fixture|live] [--trigger manual|scheduled]
+  bun src/cli.ts health [--mode fixture|live]
   bun src/cli.ts schedule install [--label L] [--interval SECONDS] [--home DIR]
   bun src/cli.ts schedule status [--label L]
   bun src/cli.ts schedule remove [--label L]`;
@@ -58,6 +64,24 @@ async function collect(args: string[]): Promise<void> {
     parent_pid: process.ppid,
     xpc_service_name: process.env.XPC_SERVICE_NAME ?? null,
   });
+}
+
+/** Prints the health report of one store; it doesn't take the run lock or create a store. */
+function health(args: string[]): void {
+  const { values } = parseArgs({ args, options: { mode: { type: "string", default: "live" } } });
+  const mode = oneOf(values.mode, ["fixture", "live"] as const, "--mode");
+  const path = rawStorePath(dataDir(appHome()), mode);
+  if (!existsSync(path)) {
+    print({ event: "collection_health", mode, store: "missing" });
+    return;
+  }
+  const store = RawStore.open(path);
+  try {
+    const report = { event: "collection_health", mode, ...collectionHealth(store.database) };
+    console.log(JSON.stringify(report, null, 2));
+  } finally {
+    store.close();
+  }
 }
 
 function schedule(args: string[]): void {
@@ -123,6 +147,7 @@ function print(value: unknown): void {
 const [command, ...args] = Bun.argv.slice(2);
 try {
   if (command === "collect") await collect(args);
+  else if (command === "health") health(args);
   else if (command === "schedule") schedule(args);
   else throw new UsageError(`unknown command: ${command ?? "(none)"}`);
 } catch (error) {

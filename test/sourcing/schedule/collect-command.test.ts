@@ -1,9 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { dataDir, runLockPath } from "../../../src/sourcing/app-home.ts";
 import { runCollectCommand } from "../../../src/sourcing/collect/command.ts";
-import type { CollectorAdapter } from "../../../src/sourcing/collect/runner.ts";
 import { CLI_PATH } from "../../../src/sourcing/schedule/launchd.ts";
 import { singleItemAdapter } from "../collect/helpers.ts";
 import { type Child, ChildHarness } from "./children.ts";
@@ -164,32 +171,24 @@ describe("the shared collect entry point (T9-A2)", () => {
 
   test("a run that fails still releases the lock", async () => {
     const h = harness();
-    const failing: CollectorAdapter = {
-      key: "failing",
-      seed: () => {
-        throw new Error("seed failed");
-      },
-      handle: () => ({ records: [] }),
-    };
     const options = {
       home: h.home,
       requested: "fixture" as const,
       trigger: "manual" as const,
       repoRoot: REPO_ROOT,
       credentialsPath: join(h.root, "no-keys.json"),
+      sources: { adapters: [], fixtures: [], credentialOrigins: [] },
     };
-    await expect(
-      runCollectCommand({
-        ...options,
-        sources: { adapters: [failing], fixtures: [], credentialOrigins: [] },
-      }),
-    ).rejects.toThrow("seed failed");
-    expect(
-      await runCollectCommand({
-        ...options,
-        sources: { adapters: [], fixtures: [], credentialOrigins: [] },
-      }),
-    ).toMatchObject({ status: "ran", mode: "fixture", credentials: "missing" });
+    // A file where the data folder belongs makes opening the store fail mid-run.
+    mkdirSync(h.home, { recursive: true });
+    writeFileSync(dataDir(h.home), "not a folder");
+    await expect(runCollectCommand(options)).rejects.toThrow();
+    rmSync(dataDir(h.home));
+    expect(await runCollectCommand(options)).toMatchObject({
+      status: "ran",
+      mode: "fixture",
+      credentials: "missing",
+    });
   });
 
   test("the command line rejects an unknown mode", async () => {

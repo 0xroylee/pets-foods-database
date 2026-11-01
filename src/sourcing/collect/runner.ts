@@ -8,7 +8,14 @@ import type { FetchResult, HttpTransport } from "../http/transport.ts";
 import { screenRecord } from "../screening.ts";
 import type { DocumentIdentity, RawStore } from "../store/raw-store.ts";
 import { type Clock, systemClock } from "./clock.ts";
-import { type AttemptOutcome, type NewWork, type WorkItem, WorkQueue } from "./work-queue.ts";
+import {
+  type AttemptDetails,
+  type AttemptOutcome,
+  type CommitCounts,
+  type NewWork,
+  type WorkItem,
+  WorkQueue,
+} from "./work-queue.ts";
 
 export const DEADLINE_MESSAGE = "Collection request deadline exceeded";
 
@@ -63,6 +70,7 @@ export interface RunSummary {
   status: "completed" | "deferred" | "partial";
   attempts: number;
   committedPages: number;
+  committed: CommitCounts;
 }
 
 export interface RunOptions {
@@ -72,6 +80,9 @@ export interface RunOptions {
   clock?: Clock;
   limits?: Partial<CollectionLimits>;
   runId?: string;
+  /** Recorded with the run, for the health report. */
+  mode?: "fixture" | "live";
+  trigger?: string;
 }
 
 type FetchOutcome =
@@ -90,48 +101,61 @@ export async function runCollection(options: RunOptions): Promise<RunSummary> {
   let attempts = 0;
   let committedPages = 0;
   let turn = 0;
+  const committed: CommitCounts = { new: 0, changed: 0, duplicate: 0 };
 
   queue.interruptAbandoned(startedAt);
+  queue.interruptAbandonedRuns(startedAt);
+  queue.startRun(runId, startedAt, options.mode, options.trigger);
   for (const adapter of adapters) {
-    if (!queue.hasAnyWork(adapter.key)) queue.enqueue(adapter.key, adapter.seed(), startedAt);
+    if (queue.hasAnyWork(adapter.key)) continue;
+    // An adapter that fails is recorded and skipped; the other sources still run.
+    try {
+      queue.enqueue(adapter.key, adapter.seed(), startedAt);
+    } catch (error) {
+      queue.recordAdapterError(runId, adapter.key, "seed", startedAt, errorMessage(error));
+    }
   }
-  const summary = (status: RunSummary["status"]): RunSummary => ({
-    runId,
-    status,
-    attempts,
-    committedPages,
-  });
 
-  for (;;) {
-    const now = clock.now();
-    if (now >= runDeadline) return summary("partial");
-    let chosen: { adapter: CollectorAdapter; work: WorkItem } | undefined;
-    let earliest = Number.POSITIVE_INFINITY;
-    // Take adapters in turn, so one slow source never starves the others.
-    for (let i = 0; i < adapters.length && !chosen; i++) {
-      const adapter = adapters[(turn + i) % adapters.length] as CollectorAdapter;
-      const work = queue.nextPending(adapter.key, runId, limits.maxTransientAttemptsPerRun);
-      if (!work) continue;
-      const readyAt = Math.max(work.eligibleAt, queue.originNextAllowed(work.origin));
-      if (readyAt <= now) {
-        chosen = { adapter, work };
-        turn = (turn + i + 1) % adapters.length;
-      } else {
-        earliest = Math.min(earliest, readyAt);
+  let status: RunSummary["status"];
+  try {
+    status = await collect();
+  } catch (error) {
+    queue.finishRun(runId, clock.now(), "failed", errorMessage(error));
+    throw error;
+  }
+  queue.finishRun(runId, clock.now(), status);
+  return { runId, status, attempts, committedPages, committed: { ...committed } };
+
+  async function collect(): Promise<RunSummary["status"]> {
+    for (;;) {
+      const now = clock.now();
+      if (now >= runDeadline) return "partial";
+      let chosen: { adapter: CollectorAdapter; work: WorkItem } | undefined;
+      let earliest = Number.POSITIVE_INFINITY;
+      // Take adapters in turn, so one slow source never starves the others.
+      for (let i = 0; i < adapters.length && !chosen; i++) {
+        const adapter = adapters[(turn + i) % adapters.length] as CollectorAdapter;
+        const work = queue.nextPending(adapter.key, runId, limits.maxTransientAttemptsPerRun);
+        if (!work) continue;
+        const readyAt = Math.max(work.eligibleAt, queue.originNextAllowed(work.origin));
+        if (readyAt <= now) {
+          chosen = { adapter, work };
+          turn = (turn + i + 1) % adapters.length;
+        } else {
+          earliest = Math.min(earliest, readyAt);
+        }
       }
+      if (!chosen) {
+        if (earliest === Number.POSITIVE_INFINITY) {
+          return adapters.some((a) => queue.hasPending(a.key)) ? "deferred" : "completed";
+        }
+        if (earliest - now > limits.maxInRunWaitMs || earliest >= runDeadline) return "deferred";
+        await clock.sleep(earliest - now);
+        continue;
+      }
+      attempts++;
+      if (await attemptWork(chosen.adapter, chosen.work)) committedPages++;
     }
-    if (!chosen) {
-      if (earliest === Number.POSITIVE_INFINITY) {
-        return summary(adapters.some((a) => queue.hasPending(a.key)) ? "deferred" : "completed");
-      }
-      if (earliest - now > limits.maxInRunWaitMs || earliest >= runDeadline) {
-        return summary("deferred");
-      }
-      await clock.sleep(earliest - now);
-      continue;
-    }
-    attempts++;
-    if (await attemptWork(chosen.adapter, chosen.work)) committedPages++;
   }
 
   async function attemptWork(adapter: CollectorAdapter, work: WorkItem): Promise<boolean> {
@@ -144,32 +168,33 @@ export async function runCollection(options: RunOptions): Promise<RunSummary> {
     const now = clock.now();
 
     if (outcome.kind === "deadline") {
-      const detail = `${DEADLINE_MESSAGE} (${outcome.stage})`;
+      const details: AttemptDetails = {
+        detail: `${DEADLINE_MESSAGE} (${outcome.stage})`,
+        httpStatus: outcome.status,
+        deadlineStage: outcome.stage,
+      };
       // A refusal stays a refusal even if its body then stalls; it is never retried at once.
       if (outcome.status === 401 || outcome.status === 403) {
-        refuse(work, attemptId, now, detail, outcome.status);
+        refuse(work, attemptId, now, details);
         return false;
       }
-      transient(
-        work,
-        attemptId,
-        now,
-        "deadline_exceeded",
-        detail,
-        outcome.status,
-        undefined,
-        outcome.partial,
-      );
+      transient(work, attemptId, now, "deadline_exceeded", {
+        ...details,
+        partialBody: outcome.partial,
+      });
       return false;
     }
     if (outcome.kind === "error") {
-      transient(work, attemptId, now, "transient_error", outcome.message);
+      transient(work, attemptId, now, "transient_error", { detail: outcome.message });
       return false;
     }
 
     const { result } = outcome;
     if (result.status === 401 || result.status === 403) {
-      refuse(work, attemptId, now, `HTTP ${result.status} refused`, result.status);
+      refuse(work, attemptId, now, {
+        detail: `HTTP ${result.status} refused`,
+        httpStatus: result.status,
+      });
       return false;
     }
     if (result.status === 408 || result.status === 429 || result.status >= 500) {
@@ -179,8 +204,7 @@ export async function runCollection(options: RunOptions): Promise<RunSummary> {
         attemptId,
         now,
         "transient_error",
-        `HTTP ${result.status}`,
-        result.status,
+        { detail: `HTTP ${result.status}`, httpStatus: result.status },
         retryAfter,
       );
       return false;
@@ -200,35 +224,51 @@ export async function runCollection(options: RunOptions): Promise<RunSummary> {
     try {
       effect = adapter.handle(result, work);
     } catch (error) {
-      transient(work, attemptId, now, "transient_error", `adapter: ${(error as Error).message}`);
+      // The adapter's failure stays with its own work; the loop goes on to the next source.
+      transient(work, attemptId, now, "transient_error", {
+        detail: `adapter: ${errorMessage(error)}`,
+        httpStatus: result.status,
+      });
       return false;
     }
     // Records, follow-up work, checkpoint and completion commit together or not at all.
+    const page: CommitCounts = { new: 0, changed: 0, duplicate: 0 };
     try {
       store.transaction((tx) => {
         let index = 0;
         // Every record is stored with its screening, whatever the flag.
         for (const { identity, record } of effect.records) {
           const screening = screenRecord(record);
-          tx.putRecord({
+          const stored = tx.putRecord({
             identity,
             record,
             observationKey: `${adapter.key}:${work.workKey}#${attemptId}:${index++}`,
             screening,
+            attemptId,
           });
+          if (stored.disposition !== "replayed") page[stored.disposition]++;
         }
         queue.enqueue(adapter.key, effect.successors ?? [], now);
         if (effect.checkpoint !== undefined) {
           queue.setCheckpoint(adapter.key, effect.checkpoint, now);
         }
         queue.complete(work.workId, now);
-        queue.finishAttempt(attemptId, "success", now, { httpStatus: result.status });
+        queue.finishAttempt(attemptId, "success", now, {
+          httpStatus: result.status,
+          committed: page,
+        });
       });
     } catch (error) {
       // The whole page rolled back; the work stays pending and is retried like any failure.
-      transient(work, attemptId, now, "transient_error", `commit: ${(error as Error).message}`);
+      transient(work, attemptId, now, "transient_error", {
+        detail: `commit: ${errorMessage(error)}`,
+        httpStatus: result.status,
+      });
       return false;
     }
+    committed.new += page.new;
+    committed.changed += page.changed;
+    committed.duplicate += page.duplicate;
     return true;
   }
 
@@ -267,9 +307,9 @@ export async function runCollection(options: RunOptions): Promise<RunSummary> {
     return winner;
   }
 
-  function refuse(work: WorkItem, attemptId: number, now: number, detail: string, status: number) {
+  function refuse(work: WorkItem, attemptId: number, now: number, details: AttemptDetails) {
     store.database.transaction(() => {
-      queue.finishAttempt(attemptId, "refused", now, { detail, httpStatus: status });
+      queue.finishAttempt(attemptId, "refused", now, details);
       queue.refuse(work.workId, now + limits.refusalCooldownMs);
     })();
   }
@@ -279,13 +319,11 @@ export async function runCollection(options: RunOptions): Promise<RunSummary> {
     attemptId: number,
     now: number,
     outcome: AttemptOutcome,
-    detail: string,
-    httpStatus?: number,
+    details: AttemptDetails,
     retryAfter?: number,
-    partialBody?: Uint8Array,
   ) {
     store.database.transaction(() => {
-      queue.finishAttempt(attemptId, outcome, now, { detail, httpStatus, partialBody });
+      queue.finishAttempt(attemptId, outcome, now, details);
       const failures = queue.recordTransientFailure(work.workId, runId);
       const backoff = Math.min(limits.backoffBaseMs * 2 ** (failures - 1), limits.backoffMaxMs);
       // Retry-After is a floor: it wins over spacing and over the backoff cap.
@@ -294,6 +332,10 @@ export async function runCollection(options: RunOptions): Promise<RunSummary> {
       if (retryAfter !== undefined) queue.delayOrigin(work.origin, now + retryAfter);
     })();
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** Retry-After as milliseconds from now: delay-seconds or an HTTP date. */

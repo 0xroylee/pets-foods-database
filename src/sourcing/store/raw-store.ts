@@ -37,6 +37,8 @@ export interface PutRecordInput {
   observationKey: string;
   /** The Pet Food screening of this retrieval, kept with the observation. */
   screening?: CandidateAssessment;
+  /** The fetch attempt that retrieved the record, when a collection run stores it. */
+  attemptId?: number;
 }
 
 export interface ObservationEntry {
@@ -317,7 +319,7 @@ export class RawStore {
       }));
   }
 
-  #put({ identity, record, observationKey, screening }: PutRecordInput): StoreOutcome {
+  #put({ identity, record, observationKey, screening, attemptId }: PutRecordInput): StoreOutcome {
     const db = this.#db;
     const replay = db
       .query<ObservationRow, [string]>(
@@ -415,12 +417,23 @@ export class RawStore {
 
     db.query<
       never,
-      [string, number, number, string, string, string, string | null, string | null, string | null]
+      [
+        string,
+        number,
+        number,
+        string,
+        string,
+        string,
+        string | null,
+        string | null,
+        string | null,
+        number | null,
+      ]
     >(
       `INSERT INTO raw_observation (observation_key, document_id, revision_id, disposition,
                                     retrieved_at, committed_at, candidate_flag,
-                                    screening_rule_version, screening_reasons)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                    screening_rule_version, screening_reasons, attempt_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       observationKey,
       document.document_id,
@@ -431,6 +444,7 @@ export class RawStore {
       screening?.flag ?? null,
       screening?.ruleVersion ?? null,
       screening ? JSON.stringify(screening.reasons) : null,
+      attemptId ?? null,
     );
     return {
       disposition,

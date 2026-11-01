@@ -28,6 +28,25 @@ export type AttemptOutcome =
   | "http_error"
   | "interrupted";
 
+export type DeadlineStage = "headers" | "body";
+
+/** What one successful attempt committed, by the raw store's disposition. */
+export interface CommitCounts {
+  new: number;
+  changed: number;
+  duplicate: number;
+}
+
+export interface AttemptDetails {
+  detail?: string;
+  httpStatus?: number;
+  partialBody?: Uint8Array;
+  deadlineStage?: DeadlineStage;
+  committed?: CommitCounts;
+}
+
+export type RunStatus = "completed" | "deferred" | "partial" | "failed" | "interrupted";
+
 export interface AttemptRow {
   attemptId: number;
   workKey: string;
@@ -38,6 +57,7 @@ export interface AttemptRow {
   detail: string | null;
   httpStatus: number | null;
   partialBytes: number;
+  deadlineStage: DeadlineStage | null;
 }
 
 interface WorkRow {
@@ -83,15 +103,16 @@ export class WorkQueue {
   }
 
   /**
-   * The adapter's next pending work, earliest eligibility first. Work that already used up its
-   * transient attempts in this run is skipped until the next run.
+   * The adapter's next pending work, earliest eligibility first. Refused work comes back once
+   * its cooldown ends. Work that already used up its transient attempts in this run is skipped
+   * until the next run.
    */
   nextPending(adapterKey: string, runId: string, maxRunFailures: number): WorkItem | undefined {
     const row = this.#db
       .query<WorkRow, [string, string, number]>(
         `SELECT work_id, adapter_key, work_key, origin, request_json, eligible_at
            FROM work_item
-          WHERE adapter_key = ? AND state = 'pending'
+          WHERE adapter_key = ? AND state IN ('pending', 'refused')
             AND NOT (run_failures_run_id IS ? AND run_failures >= ?)
           ORDER BY eligible_at, work_id
           LIMIT 1`,
@@ -104,7 +125,8 @@ export class WorkQueue {
     return (
       this.#db
         .query<{ n: number }, [string]>(
-          "SELECT count(*) AS n FROM work_item WHERE adapter_key = ? AND state = 'pending'",
+          `SELECT count(*) AS n FROM work_item
+            WHERE adapter_key = ? AND state IN ('pending', 'refused')`,
         )
         .get(adapterKey)?.n !== 0
     );
@@ -122,16 +144,33 @@ export class WorkQueue {
     ).attempt_id;
   }
 
+  /** Finishes an attempt once; a finished attempt is never changed again. */
   finishAttempt(
     attemptId: number,
     outcome: AttemptOutcome,
     now: number,
-    details: { detail?: string; httpStatus?: number; partialBody?: Uint8Array } = {},
+    details: AttemptDetails = {},
   ): void {
     this.#db
-      .query<never, [number, string, string | null, number | null, Uint8Array | null, number]>(
+      .query<
+        never,
+        [
+          number,
+          string,
+          string | null,
+          number | null,
+          Uint8Array | null,
+          string | null,
+          number | null,
+          number | null,
+          number | null,
+          number,
+        ]
+      >(
         `UPDATE fetch_attempt
-            SET finished_at = ?, outcome = ?, detail = ?, http_status = ?, partial_body = ?
+            SET finished_at = ?, outcome = ?, detail = ?, http_status = ?, partial_body = ?,
+                deadline_stage = ?, committed_new = ?, committed_changed = ?,
+                committed_duplicate = ?
           WHERE attempt_id = ? AND finished_at IS NULL`,
       )
       .run(
@@ -140,8 +179,54 @@ export class WorkQueue {
         details.detail ?? null,
         details.httpStatus ?? null,
         details.partialBody ?? null,
+        details.deadlineStage ?? null,
+        details.committed?.new ?? null,
+        details.committed?.changed ?? null,
+        details.committed?.duplicate ?? null,
         attemptId,
       );
+  }
+
+  startRun(runId: string, now: number, mode?: "fixture" | "live", trigger?: string): void {
+    this.#db
+      .query<never, [string, string | null, string | null, number]>(
+        "INSERT INTO collection_run (run_id, mode, trigger, started_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(runId, mode ?? null, trigger ?? null, now);
+  }
+
+  finishRun(runId: string, now: number, status: RunStatus, detail?: string): void {
+    this.#db
+      .query<never, [number, string, string | null, string]>(
+        `UPDATE collection_run SET finished_at = ?, status = ?, detail = ?
+          WHERE run_id = ? AND finished_at IS NULL`,
+      )
+      .run(now, status, detail ?? null, runId);
+  }
+
+  /** Runs a previous process left unfinished are marked interrupted. */
+  interruptAbandonedRuns(now: number): number {
+    return this.#db
+      .query<never, [number]>(
+        `UPDATE collection_run SET finished_at = ?, status = 'interrupted'
+          WHERE finished_at IS NULL`,
+      )
+      .run(now).changes;
+  }
+
+  recordAdapterError(
+    runId: string,
+    adapterKey: string,
+    stage: "seed",
+    now: number,
+    detail: string,
+  ): void {
+    this.#db
+      .query<never, [string, string, string, number, string]>(
+        `INSERT INTO adapter_error (run_id, adapter_key, stage, occurred_at, detail)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(runId, adapterKey, stage, now, detail);
   }
 
   /** Attempts a previous run left unfinished (the process died) are marked interrupted. */
@@ -259,11 +344,13 @@ export class WorkQueue {
           detail: string | null;
           http_status: number | null;
           partial_bytes: number | null;
+          deadline_stage: DeadlineStage | null;
         },
         [string | null, string | null]
       >(
         `SELECT a.attempt_id, w.work_key, a.run_id, a.started_at, a.finished_at, a.outcome,
-                a.detail, a.http_status, length(a.partial_body) AS partial_bytes
+                a.detail, a.http_status, length(a.partial_body) AS partial_bytes,
+                a.deadline_stage
            FROM fetch_attempt a JOIN work_item w ON w.work_id = a.work_id
           WHERE ? IS NULL OR w.adapter_key = ?
           ORDER BY a.attempt_id`,
@@ -279,6 +366,7 @@ export class WorkQueue {
         detail: row.detail,
         httpStatus: row.http_status,
         partialBytes: row.partial_bytes ?? 0,
+        deadlineStage: row.deadline_stage,
       }));
   }
 }

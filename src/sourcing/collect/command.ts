@@ -79,6 +79,8 @@ export async function runCollectCommand(
         transport,
         clock: options.clock,
         limits: options.limits,
+        mode: decision.mode,
+        trigger,
       });
       return { status: "ran", trigger, mode: decision.mode, summary, ...keys };
     } finally {

@@ -13,7 +13,8 @@
     "verify:sourcing:credentials": "bun test test/sourcing/credentials",
     "verify:sourcing:recovery": "bun test test/sourcing/collect",
     "verify:sourcing:screening": "bun test test/sourcing/screening",
-    "verify:sourcing:schedule": "bun test test/sourcing/schedule"
+    "verify:sourcing:schedule": "bun test test/sourcing/schedule",
+    "verify:sourcing:health": "bun test test/sourcing/health"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.3",

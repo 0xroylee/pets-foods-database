@@ -136,4 +136,44 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE raw_observation ADD COLUMN screening_rule_version TEXT;
   ALTER TABLE raw_observation ADD COLUMN screening_reasons TEXT;
   `,
+  `
+  -- Collection health. One row per run, written when the run starts and finished when it ends.
+  CREATE TABLE collection_run (
+    run_id TEXT PRIMARY KEY,
+    mode TEXT CHECK (mode IN ('fixture', 'live')),
+    trigger TEXT,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    status TEXT CHECK (status IN ('completed', 'deferred', 'partial', 'failed', 'interrupted')),
+    detail TEXT
+  );
+  CREATE TRIGGER collection_run_no_delete BEFORE DELETE ON collection_run
+  BEGIN SELECT RAISE(ABORT, 'collection runs are never deleted'); END;
+
+  -- An adapter failure outside any request, such as a seed that throws.
+  CREATE TABLE adapter_error (
+    error_id INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    adapter_key TEXT NOT NULL,
+    stage TEXT NOT NULL CHECK (stage IN ('seed')),
+    occurred_at INTEGER NOT NULL,
+    detail TEXT NOT NULL
+  );
+  CREATE TRIGGER adapter_error_no_delete BEFORE DELETE ON adapter_error
+  BEGIN SELECT RAISE(ABORT, 'adapter errors are never deleted'); END;
+
+  -- The stage a deadline cut off, and what a successful attempt committed.
+  ALTER TABLE fetch_attempt ADD COLUMN deadline_stage TEXT
+    CHECK (deadline_stage IN ('headers', 'body'));
+  ALTER TABLE fetch_attempt ADD COLUMN committed_new INTEGER;
+  ALTER TABLE fetch_attempt ADD COLUMN committed_changed INTEGER;
+  ALTER TABLE fetch_attempt ADD COLUMN committed_duplicate INTEGER;
+  -- A finished attempt is final: its outcome, reason and times never change.
+  CREATE TRIGGER fetch_attempt_final BEFORE UPDATE ON fetch_attempt
+  WHEN OLD.finished_at IS NOT NULL
+  BEGIN SELECT RAISE(ABORT, 'finished fetch attempts are final'); END;
+
+  -- The attempt that fetched each observation, so health can list fetched documents.
+  ALTER TABLE raw_observation ADD COLUMN attempt_id INTEGER REFERENCES fetch_attempt (attempt_id);
+  `,
 ];
