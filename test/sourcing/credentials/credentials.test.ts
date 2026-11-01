@@ -18,6 +18,7 @@ import {
   loadFdaCredentials,
 } from "../../../src/sourcing/credentials.ts";
 import {
+  COLLECTOR_USER_AGENT,
   type FetchResult,
   FixtureTransport,
   LiveTransport,
@@ -173,6 +174,25 @@ describe("loading keys (T4-A1)", () => {
     expect(output).toContain("[redacted]");
     expect(output).not.toContain(CANARY_KEY);
     expect(output).not.toContain(CANARY_USER);
+  });
+});
+
+describe("honest identification (ADR 0003)", () => {
+  test("live requests always name the collector, even if a request asks otherwise", async () => {
+    const agents: (string | null)[] = [];
+    const fakeFetch = (async (_url: string, init: RequestInit) => {
+      agents.push(new Headers(init.headers).get("User-Agent"));
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    const transport = new LiveTransport({ fetch: fakeFetch, credentialOrigins: [] });
+    await transport.sendAndRead({ method: "GET", url: "https://example.test/a" });
+    await transport.sendAndRead({
+      method: "GET",
+      url: "https://example.test/b",
+      headers: { "User-Agent": "Mozilla/5.0 (Macintosh) Safari/605.1.15" },
+    });
+    expect(agents).toEqual([COLLECTOR_USER_AGENT, COLLECTOR_USER_AGENT]);
+    expect(COLLECTOR_USER_AGENT).toContain("pets-foods-database");
   });
 });
 

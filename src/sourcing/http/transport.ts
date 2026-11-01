@@ -99,6 +99,10 @@ export class FixtureTransport implements HttpTransport {
   }
 }
 
+/** How every live request identifies itself. Never replaced by a browser-like string (ADR 0003). */
+export const COLLECTOR_USER_AGENT =
+  "pets-foods-database-collector/0.1 (+https://github.com/0xroylee/pets-foods-database)";
+
 export interface LiveTransportOptions {
   fetch: typeof fetch;
   credentials?: FdaCredentials;
@@ -120,6 +124,7 @@ export class LiveTransport implements HttpTransport {
   ): Promise<FetchResult> {
     const { fetch: send, credentials, credentialOrigins } = this.#options;
     const headers = new Headers(request.headers);
+    headers.set("User-Agent", COLLECTOR_USER_AGENT);
     if (credentials && credentialOrigins.includes(new URL(request.url).origin)) {
       credentials.applyTo(headers);
     }
