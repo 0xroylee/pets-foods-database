@@ -14,7 +14,8 @@
     "verify:sourcing:recovery": "bun test test/sourcing/collect",
     "verify:sourcing:screening": "bun test test/sourcing/screening",
     "verify:sourcing:schedule": "bun test test/sourcing/schedule",
-    "verify:sourcing:health": "bun test test/sourcing/health"
+    "verify:sourcing:health": "bun test test/sourcing/health",
+    "verify:sourcing:saved-pages": "bun test test/sourcing/fda/saved-pages.test.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.3",

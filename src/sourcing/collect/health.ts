@@ -14,6 +14,31 @@ export interface CollectionHealth {
   /** Origins that may not be contacted yet, for example after a Retry-After. */
   pausedOrigins: { origin: string; until: string }[];
   sources: SourceReport[];
+  savedPages: SavedPagesReport;
+}
+
+/** fda.gov pages imported from the inbox (ADR 0003). */
+export interface SavedPagesReport {
+  imported: number;
+  rejected: number;
+  committed: CommitCounts;
+  /** Newest first, up to the report's limit. */
+  recent: {
+    fileName: string;
+    url: string;
+    documentType: string;
+    disposition: "new" | "changed" | "duplicate";
+    savedAt: string;
+    importedAt: string;
+  }[];
+  /** Every rejection, newest first, with the reason the owner sees. */
+  rejections: {
+    fileName: string;
+    format: string | null;
+    reason: string;
+    importerVersion: string;
+    importedAt: string;
+  }[];
 }
 
 export interface RunReport {
@@ -172,7 +197,76 @@ export function collectionHealth(db: Database, options: HealthOptions = {}): Col
     runs,
     pausedOrigins,
     sources: sourceKeys.map((source) => sourceReport(db, source, now, fetchedLimit)),
+    savedPages: savedPagesReport(db, fetchedLimit),
   };
+}
+
+function savedPagesReport(db: Database, limit: number): SavedPagesReport {
+  const report: SavedPagesReport = {
+    imported: 0,
+    rejected: 0,
+    committed: { new: 0, changed: 0, duplicate: 0 },
+    recent: [],
+    rejections: [],
+  };
+  for (const row of db
+    .query<
+      { outcome: "imported" | "rejected"; disposition: keyof CommitCounts | null; n: number },
+      []
+    >("SELECT outcome, disposition, count(*) AS n FROM saved_page_import GROUP BY 1, 2")
+    .all()) {
+    report[row.outcome] += row.n;
+    if (row.disposition) report.committed[row.disposition] += row.n;
+  }
+  report.recent = db
+    .query<
+      {
+        file_name: string;
+        original_url: string;
+        document_type: string;
+        disposition: "new" | "changed" | "duplicate";
+        saved_at: string;
+        imported_at: number;
+      },
+      [number]
+    >(
+      `SELECT file_name, original_url, document_type, disposition, saved_at, imported_at
+         FROM saved_page_import WHERE outcome = 'imported'
+        ORDER BY import_id DESC LIMIT ?`,
+    )
+    .all(limit)
+    .map((row) => ({
+      fileName: row.file_name,
+      url: row.original_url,
+      documentType: row.document_type,
+      disposition: row.disposition,
+      savedAt: row.saved_at,
+      importedAt: iso(row.imported_at),
+    }));
+  report.rejections = db
+    .query<
+      {
+        file_name: string;
+        format: string | null;
+        reason: string;
+        importer_version: string;
+        imported_at: number;
+      },
+      []
+    >(
+      `SELECT file_name, format, reason, importer_version, imported_at
+         FROM saved_page_import WHERE outcome = 'rejected'
+        ORDER BY import_id DESC`,
+    )
+    .all()
+    .map((row) => ({
+      fileName: row.file_name,
+      format: row.format,
+      reason: row.reason,
+      importerVersion: row.importer_version,
+      importedAt: iso(row.imported_at),
+    }));
+  return report;
 }
 
 function sourceReport(db: Database, source: string, now: number, limit: number): SourceReport {

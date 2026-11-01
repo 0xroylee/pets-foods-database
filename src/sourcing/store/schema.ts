@@ -176,4 +176,28 @@ export const MIGRATIONS: readonly string[] = [
   -- The attempt that fetched each observation, so health can list fetched documents.
   ALTER TABLE raw_observation ADD COLUMN attempt_id INTEGER REFERENCES fetch_attempt (attempt_id);
   `,
+  `
+  -- fda.gov pages the owner saved into the inbox (ADR 0003): one row each time a file is
+  -- imported or rejected. A file is identified by the hash of its bytes, wherever it sits.
+  CREATE TABLE saved_page_import (
+    import_id INTEGER PRIMARY KEY,
+    file_sha256 TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    format TEXT CHECK (format IN ('html', 'webarchive', 'mhtml')),
+    importer_version TEXT NOT NULL,
+    imported_at INTEGER NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('imported', 'rejected')),
+    reason TEXT,
+    original_url TEXT,
+    saved_at TEXT,
+    document_type TEXT,
+    document_id INTEGER REFERENCES raw_document (document_id),
+    disposition TEXT CHECK (disposition IN ('new', 'changed', 'duplicate'))
+  );
+  CREATE INDEX saved_page_import_by_file ON saved_page_import (file_sha256);
+  CREATE TRIGGER saved_page_import_no_update BEFORE UPDATE ON saved_page_import
+  BEGIN SELECT RAISE(ABORT, 'saved page imports are never changed'); END;
+  CREATE TRIGGER saved_page_import_no_delete BEFORE DELETE ON saved_page_import
+  BEGIN SELECT RAISE(ABORT, 'saved page imports are never deleted'); END;
+  `,
 ];

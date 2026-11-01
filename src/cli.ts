@@ -1,19 +1,22 @@
 // The back office command line. Manual and scheduled collection run the same command:
 //   bun src/cli.ts collect [--mode auto|fixture|live] [--trigger manual|scheduled]
 //   bun src/cli.ts health [--mode fixture|live]
+//   bun src/cli.ts import
+//   bun src/cli.ts inbox [--open]
 //   bun src/cli.ts schedule install [--label L] [--interval SECONDS] [--home DIR]
 //   bun src/cli.ts schedule status [--label L]
 //   bun src/cli.ts schedule remove [--label L]
 // PFDB_HOME moves the private app folder (run lock, raw stores, logs) and
 // PFDB_FDA_CREDENTIALS moves the keys file.
 
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { appHome, dataDir } from "./sourcing/app-home.ts";
-import { runCollectCommand } from "./sourcing/collect/command.ts";
+import { appHome, dataDir, inboxDir } from "./sourcing/app-home.ts";
+import { runCollectCommand, runImportCommand } from "./sourcing/collect/command.ts";
 import { collectionHealth } from "./sourcing/collect/health.ts";
 import { rawStorePath } from "./sourcing/collect/mode.ts";
+import { savedPageFiles } from "./sourcing/fda/saved-pages.ts";
 import {
   buildMacSchedule,
   inspectInstalledSchedule,
@@ -29,6 +32,8 @@ import { RawStore } from "./sourcing/store/raw-store.ts";
 const USAGE = `usage:
   bun src/cli.ts collect [--mode auto|fixture|live] [--trigger manual|scheduled]
   bun src/cli.ts health [--mode fixture|live]
+  bun src/cli.ts import
+  bun src/cli.ts inbox [--open]
   bun src/cli.ts schedule install [--label L] [--interval SECONDS] [--home DIR]
   bun src/cli.ts schedule status [--label L]
   bun src/cli.ts schedule remove [--label L]`;
@@ -64,6 +69,27 @@ async function collect(args: string[]): Promise<void> {
     parent_pid: process.ppid,
     xpc_service_name: process.env.XPC_SERVICE_NAME ?? null,
   });
+}
+
+/** Imports the fda.gov pages saved in the inbox now, instead of waiting for the next run. */
+async function importInbox(args: string[]): Promise<void> {
+  parseArgs({ args, options: {} });
+  const home = appHome();
+  print({
+    event: "saved_pages_import",
+    inbox: inboxDir(home),
+    ...(await runImportCommand({ home })),
+  });
+}
+
+/** Shows where to save fda.gov pages, creating the private folder if needed. */
+function inbox(args: string[]): void {
+  const { values } = parseArgs({ args, options: { open: { type: "boolean", default: false } } });
+  const path = inboxDir(appHome());
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  chmodSync(path, 0o700);
+  print({ event: "inbox", path, files: savedPageFiles(path).length });
+  if (values.open) Bun.spawnSync(["open", path]);
 }
 
 /** Prints the health report of one store; it doesn't take the run lock or create a store. */
@@ -148,6 +174,8 @@ const [command, ...args] = Bun.argv.slice(2);
 try {
   if (command === "collect") await collect(args);
   else if (command === "health") health(args);
+  else if (command === "import") await importInbox(args);
+  else if (command === "inbox") inbox(args);
   else if (command === "schedule") schedule(args);
   else throw new UsageError(`unknown command: ${command ?? "(none)"}`);
 } catch (error) {

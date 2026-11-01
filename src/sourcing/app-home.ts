@@ -28,3 +28,8 @@ export function dataDir(home: string): string {
 export function logDir(home: string): string {
   return join(home, "logs");
 }
+
+/** Where the owner saves fda.gov pages for import (ADR 0003). */
+export function inboxDir(home: string): string {
+  return join(home, "inbox");
+}

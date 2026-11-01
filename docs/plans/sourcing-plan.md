@@ -58,6 +58,7 @@ The host received approved true through the agent protocol; it cannot verify who
   - A17: Collection covers warning letters to animal food firms and CVM outbreaks and advisories pages. → T8 → T8-V1
   - A18: HTTP 401 and other access refusals are recorded as failures rather than successful empty collections. → T8 → T8-V1
   - A19: A refusal does not crash collection or trigger aggressive retries. → T8 → T8-V1
+  - Re-scoped by ADR 0003 (2026-11-01): fda.gov pages arrive as files the owner saves, so T8 meets A16 and A17 by importing them. A18 and A19 no longer apply to those pages, since nothing is requested; refusals of the keyed API requests stay covered by T5 and T7.
 - **R6.** Assign a deterministic three-state Pet Food candidate flag without discarding records or performing final classification. (you said: "6. Pet Food screening without dropping data. iRES "Veterinary" also covers animal drugs, compounded veterinary medicines and livestock or horse feed. Each record gets a Pet Food candidate flag (likely dog or cat complete diet, unlikely, unknown) from deterministic rules on the product description and firm. Nothing is deleted; the final classification happens later in the core's AI triage.") → T6
   - A20: Every record receives a likely, unlikely or unknown Pet Food candidate flag, with likely referring to dog or cat complete diets. → T6 → T6-V1
   - A21: The flag is determined by reproducible rules using product description and firm. → T6 → T6-V1
@@ -317,35 +318,42 @@ Source basis:
 - Headers and cancellation pass through the HTTP boundary. ([packages/http-crawler/src/internals/http-crawler.ts L660-L1020](https://github.com/apify/crawlee/blob/65254412a9f9d84a10b51ef4ada58a3cfd9046fc/packages/http-crawler/src/internals/http-crawler.ts#L660-L1020))
 - The local feature map requires FDA full backfill. (`docs/flows.md#L1-L198`)
 
-### T8: Collect FDA discovery sources and destination documents
+### T8: Import the fda.gov pages the owner saves
 
-Verify current listing, XLSX, RSS, warning-letter and CVM structures and obtain recorded detail responses. Store discovery artifacts separately, deduplicate their references and enqueue durable destination fetches. Create a press-release record only from the fetched release document, retaining its complete raw detail payload and original URL. An RSS 20-item window is not historical coverage. Fetch warning letters and CVM outbreak/advisory documents, preserve all available fields and barcode formats, and record refusal or detail-fetch failure without fabricating records from summaries.
+Re-scoped on 2026-11-01 by [ADR 0003](../adr/0003-sanctioned-fda-access.md). fda.gov refuses automated clients, so the collector no longer fetches listings, XLSX, RSS or detail pages. Instead, the owner saves recall press releases, warning letters, and CVM outbreak, advisory and update pages from a browser into the private inbox folder (`bun src/cli.ts inbox --open`). Every live run, or `bun src/cli.ts import`, imports new files. The fetch-based version of this task is in git history (4e73935). Its A18 and A19, about refusals of fda.gov requests, no longer apply, because the importer sends no requests.
+
+The importer reads Safari web archives, Chrome single-file pages (MHTML) and plain HTML saves. It takes the page URL from the container, the browser's saved-from note, the canonical link or og:url. It takes the save time from the MHTML Date header or the file's creation time. It keeps the saved HTML byte for byte as the payload, takes the document type from the URL path, and fills only the fields the page states; brand, reason and headline stay in the payload (ADR 0002 keeps the format frozen). Every file is logged as imported or rejected with its reason, and each file is imported once.
 
 Requirements: R5, R1
-Depends on: T3, T4, T5, T6
+Depends on: T1, T2, T6, T9, T10
 
 Acceptance:
 
-- [ ] T8-A1 (R5; covers A16): Listing, XLSX and RSS discovery leads to actual destination-release fetches; overlapping references produce one document whose raw payload is the full release detail response.
-- [ ] T8-A2 (R5; covers A17): Animal-food warning letters and CVM outbreak/advisory detail pages become retained records with correct types and original payloads.
-- [ ] T8-A3 (R5; covers A18): 401 and other refusals are recorded failures, not successful empty discovery/detail results.
-- [ ] T8-A4 (R5; covers A19): Refusals receive one immediate attempt, persisted cooldown and continued runner operation without aggressive retries.
-- [ ] T8-A5 (R1; covers A4): Document extraction preserves available fields and full source-declared UPC-A, EAN-13 and GTIN-14 strings.
+- [ ] T8-A1 (R5; covers A16): A saved recall press release becomes one document whose payload is the saved page HTML, with the page URL and save time. In any save format, the same page saved again unchanged is a duplicate, and a changed page adds one revision.
+- [ ] T8-A2 (R5; covers A17): Saved animal-food warning letters and CVM outbreak or advisory pages become records with the correct types and original payloads.
+- [ ] T8-A3 (R5): A file the importer can't use (not a web page, not from fda.gov, an unsupported page type, or no address) is logged as rejected with its reason. It is never stored as an empty or guessed record, and the other files still import.
+- [ ] T8-A4 (R5): Every live run imports the inbox under the run lock, with no FDA keys and no network request. Fixture runs never read the inbox.
+- [ ] T8-A5 (R1; covers A4): Extraction preserves the available fields and every full UPC-A, EAN-13 and GTIN-14 string the source declares.
 
-Proposed verification:
+Verification:
 
-- T8-V1 checks A16, A17, A18, A19, A4: Create discovery-to-detail integration tests with recorded listing/XLSX/RSS and release-detail fixtures. Require a detail request and exact retained detail bytes/hash containing text absent from listing summaries; overlapping references should enqueue one detail fetch per epoch. Test detail refusal without a fabricated release. Include actual decoding of raw detail content with non-UPC barcode values. Port E98/E54 status-policy scenarios with the local refusal outcome rather than anti-blocking retries. Create and run `bun run verify:sourcing:fda-documents` as part of implementation.
-  - Must fail on T8-V1-M1 (A16): Return no discoveries from the XLSX adapter. Expected failure: The XLSX-specific destination release is missing from fetched and retained documents.
-  - Must fail on T8-V1-M2 (A16): Retain discovery summaries as release records without fetching destination releases. Expected failure: The integration assertion expects a detail fetch and the detail payload hash; it observes zero detail fetches or listing bytes instead.
-  - Must fail on T8-V1-M3 (A17): Omit the warning-letter adapter. Expected failure: The required warning-letter document and raw detail payload are absent.
-  - Must fail on T8-V1-M4 (A18): Convert a 401 into a valid empty result. Expected failure: The outcome assertion expects refusal with unchanged successful coverage and receives success.
-  - Must fail on T8-V1-M5 (A19): Retry 401 through the immediate transient-retry path. Expected failure: The refusal case observes more than one immediate request; expected one.
-  - Must fail on T8-V1-M6 (A4): Drop non-12-digit barcodes during HTML detail extraction. Expected failure: The production detail decoder omits the expected EAN-13 and GTIN-14 strings.
+- T8-V1 checks A16, A17, A4: `bun run verify:sourcing:saved-pages` imports synthetic saved pages: plain HTML, a web archive built with plutil, and a Chrome-style MHTML with quoted-printable encoding. It checks payload bytes and hashes, URL, save time, dispositions, page types, fields, rejections with their reasons, keyless scheduled imports with a fetch spy, the run lock, and fixture runs.
+  - Must fail on T8-M1 (A16): Ignore web archives. Expected failure: the web-archive save is rejected, so the duplicate is missing.
+  - Must fail on T8-M2 (A16): Store the extracted text instead of the saved HTML. Expected failure: the payload bytes and hash differ from the saved file.
+  - Must fail on T8-M3 (A17): Omit the warning-letter page type. Expected failure: the warning letter is rejected and its record is absent.
+  - Must fail on T8-M4 (T8-A3): Count an unusable file as imported. Expected failure: the summary and health show no rejection.
+  - Must fail on T8-M5 (T8-A3): Stop at the first unusable file. Expected failure: the later release is not imported.
+  - Must fail on T8-M6 (A4): Drop non-12-digit barcodes during HTML extraction. Expected failure: the declared EAN-13 and GTIN-14 strings are missing.
+  - Must fail on T8-M7 (A16): Use the import time as the save time. Expected failure: retrieved_at differs from when the file was saved.
+  - Must fail on T8-M8 (T8-A4): Import only when keys exist. Expected failure: the keyless scheduled run imports nothing.
+  - Must fail on T8-M9 (T8-A4): Import without the run lock. Expected failure: the import runs while a collection holds the lock.
+- T8-V2 (manual, with T11): Replace the synthetic fixtures with pages the owner saved from fda.gov. Confirm that real pages use the labels the importer reads: "Company Name", "Product Description", the announcement and publish dates, "Content current as of", the MARCS-CMS line, and a warning letter's heading.
 
-Done when: each wrong implementation named above, applied alone to the finished code, makes its check fail, while the unmodified code passes every check above. unshit has not applied any of them or run any check.
+Done when: each wrong implementation named above, applied alone to the finished code, makes its check fail, while the unmodified code passes every check above.
 
 Source basis:
 
+- fda.gov pages arrive as files the owner saves. (`docs/adr/0003-sanctioned-fda-access.md`)
 - A Report is the collected source document. (`CONTEXT.md#L1-L145`)
 - Full source material stays private. (`docs/adr/0001-mac-back-office-cloud-public-site.md#L1-L14`)
 - Response status and parsing are distinct transport concerns. ([packages/http-crawler/src/internals/http-crawler.ts L660-L1020](https://github.com/apify/crawlee/blob/65254412a9f9d84a10b51ef4ada58a3cfd9046fc/packages/http-crawler/src/internals/http-crawler.ts#L660-L1020))
@@ -741,6 +749,8 @@ New design reason: R5/R8/R9 require separate policies and complete observations.
 - Retry reasons and exhaustion are separately tracked. ([scrapy/downloadermiddlewares/retry.py L1-L200](https://github.com/scrapy/scrapy/blob/51c10b14fca6d272587a5c23cf3ae8effdff16cd/scrapy/downloadermiddlewares/retry.py#L1-L200))
 
 ### D9: Require continuing discovery and actual detail acquisition
+
+Superseded for fda.gov pages by ADR 0003: they arrive as files the owner saves, imported by T8. The rest of this decision applies to the keyed APIs.
 
 Schedule post-backfill new-record discovery independently from refreshes, and fetch press-release destinations after listing/XLSX/RSS discovery.
 
