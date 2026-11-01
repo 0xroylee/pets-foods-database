@@ -1,16 +1,10 @@
 // FDA API keys: read from a private local file outside the repository, never printed.
 
 import { readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { DEFAULT_APP_HOME } from "./app-home.ts";
 
-export const DEFAULT_CREDENTIALS_FILE = join(
-  homedir(),
-  "Library",
-  "Application Support",
-  "pets-foods-database",
-  "fda-credentials.json",
-);
+export const DEFAULT_CREDENTIALS_FILE = join(DEFAULT_APP_HOME, "fda-credentials.json");
 
 const REDACTED = "[redacted]";
 
